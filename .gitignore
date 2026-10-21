@@ -1,0 +1,11 @@
+# ---- TextLens 打包/构建产物 ----
+build/
+dist/
+*.spec
+
+# ---- Python 缓存 ----
+__pycache__/
+*.pyc
+
+# ---- 本机工作记忆（含本机路径等私人信息，勿公开）----
+.workbuddy/memory/
