@@ -11,6 +11,7 @@ import os
 import sys
 import ctypes
 import io
+import re
 import asyncio
 import threading
 
@@ -51,6 +52,20 @@ if _ocr_engine is None:
         _ocr_engine = None
 
 
+# CJK 字符范围（含扩展 A、兼容区、全角符号等）
+_CJK_CLASS = r"[\u3000\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]"
+# 去掉与 CJK 相邻的空格（含全角空格/制表符），保留英文词间空格；不碰换行符
+_CJK_SPACE_RE = re.compile(
+    r"(?<=" + _CJK_CLASS + r")[ \t\u3000]+|[ \t\u3000]+(?=" + _CJK_CLASS + r")"
+)
+
+
+def _clean_ocr_spaces(text: str) -> str:
+    """去除中文 OCR 常见的逐字/逐词空格：凡是挨着中文字符的空格都删掉，
+    仅保留两个西文词之间的空格；换行符 \\n 不受影响。"""
+    return _CJK_SPACE_RE.sub("", text)
+
+
 async def _ocr_async(png_bytes: bytes) -> str:
     stream = InMemoryRandomAccessStream()
     writer = DataWriter(stream)
@@ -60,7 +75,10 @@ async def _ocr_async(png_bytes: bytes) -> str:
     decoder = await BitmapDecoder.create_async(stream)
     bitmap = await decoder.get_software_bitmap_async()
     result = await _ocr_engine.recognize_async(bitmap)
-    return result.text or ""
+    if result is None:
+        return ""
+    # 直接取 result.text（已含行内/行间结构），再清洗中文周围的多余空格
+    return _clean_ocr_spaces(result.text or "")
 
 
 def ocr_pil_image(img: Image.Image) -> str:

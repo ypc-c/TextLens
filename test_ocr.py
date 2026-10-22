@@ -25,6 +25,18 @@ buf = io.BytesIO()
 img.save(buf, format="PNG")
 png = buf.getvalue()
 
+import re
+
+_CJK_CLASS = r"[\u3000\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]"
+_CJK_SPACE_RE = re.compile(
+    r"(?<=" + _CJK_CLASS + r")[ \t\u3000]+|[ \t\u3000]+(?=" + _CJK_CLASS + r")"
+)
+
+
+def _clean_ocr_spaces(text):
+    return _CJK_SPACE_RE.sub("", text)
+
+
 async def run():
     stream = InMemoryRandomAccessStream()
     writer = DataWriter(stream)
@@ -34,6 +46,7 @@ async def run():
     decoder = await BitmapDecoder.create_async(stream)
     bitmap = await decoder.get_software_bitmap_async()
     result = await engine.recognize_async(bitmap)
-    print("OCR result:", repr(result.text))
+    print("OCR raw   :", repr(result.text))
+    print("OCR cleaned:", repr(_clean_ocr_spaces(result.text or "")))
 
 asyncio.run(run())
