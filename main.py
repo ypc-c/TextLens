@@ -28,7 +28,7 @@ except Exception:
 
 from PySide6.QtCore import Qt, QTimer, QPoint, QRect, Signal, QObject, QVariantAnimation
 from PySide6.QtGui import QPainter, QColor, QPen, QCursor, QGuiApplication, QFont, QIcon, QPixmap
-from PySide6.QtWidgets import QApplication, QWidget, QMenu
+from PySide6.QtWidgets import QApplication, QWidget, QMenu, QSystemTrayIcon
 
 import mss
 from PIL import Image
@@ -105,6 +105,35 @@ def capture_region(rect: QRect) -> Image.Image:
             "height": rect.height(),
         })
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+
+# ---------- 系统托盘 ----------
+_tray = None
+_tray_menu = None
+_act_toggle = None
+
+
+def notify(title: str, msg: str, msecs: int = 2500, warn: bool = False):
+    """弹出系统气泡通知。托盘不可用时静默跳过，不影响主流程。"""
+    if _tray is None or not QSystemTrayIcon.isSystemTrayAvailable():
+        return
+    icon = QSystemTrayIcon.Warning if warn else QSystemTrayIcon.Information
+    _tray.showMessage(title, msg, icon, msecs)
+
+
+def _toggle_float(win):
+    """显示/隐藏浮窗，并同步托盘菜单文案。"""
+    global _act_toggle
+    if win.isVisible():
+        win.hide()
+        win._user_hidden = True
+    else:
+        win._user_hidden = False
+        win.show()
+        win.raise_()
+        win.activateWindow()
+    if _act_toggle is not None:
+        _act_toggle.setText("隐藏浮窗" if win.isVisible() else "显示浮窗")
 
 
 # ---------- 选框层 ----------
@@ -206,6 +235,7 @@ class FloatWindow(QWidget):
         self._drag_offset = None
         self._moving = False
         self._busy = False
+        self._user_hidden = False  # 用户通过托盘主动隐藏时不自动弹回
         self._msg = "取字"
         self._msg_color = QColor(255, 255, 255)
         # 猫爪图标（assets/float.png），缺失时回退为文字样式
@@ -295,6 +325,8 @@ class FloatWindow(QWidget):
 
     # --- 取字流程 ---
     def start_capture(self):
+        if self._busy:
+            return
         self._busy = True
         self.hide()
         self._selector = RegionSelector()
@@ -305,13 +337,15 @@ class FloatWindow(QWidget):
     def _on_cancel(self):
         self._selector.close()
         self._busy = False
-        self.show()
-        self.activateWindow()
+        if not self._user_hidden:
+            self.show()
+            self.activateWindow()
 
     def _on_region(self, rect: QRect):
         self._selector.close()
         self._set_status("识别中…", QColor(255, 210, 90))
-        self.show()
+        if not self._user_hidden:
+            self.show()
         threading.Thread(target=self._ocr_worker, args=(rect,), daemon=True).start()
 
     def _ocr_worker(self, rect: QRect):
@@ -338,10 +372,13 @@ class FloatWindow(QWidget):
             QApplication.clipboard().setText(text)
             n = len(text.replace("\n", ""))
             self._set_status(f"已复制\n{n}字", QColor(120, 255, 160))
+            notify("TextLens", f"已复制 {n} 字到剪贴板", 2500)
         elif err:
             self._set_status("识别失败", QColor(255, 120, 120))
+            notify("TextLens", f"识别失败：{err[:100]}", 4000, warn=True)
         else:
             self._set_status("无文字", QColor(255, 180, 120))
+            notify("TextLens", "选区内没有识别到文字", 2500)
         self._play_squish()
         QTimer.singleShot(1600, self._reset_status)
 
@@ -391,17 +428,52 @@ class _OcrDoneEvent(QEvent):
 
 
 def main():
+    global _tray, _tray_menu, _act_toggle
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(True)
+    app.setApplicationName("TextLens")
+    app.setApplicationDisplayName("TextLens")
+    # 让系统通知归属到 TextLens，而不是 pythonw.exe
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("TextLens.Desktop.OCR.1")
+    except Exception:
+        pass
+    # 托盘常驻：浮窗临时隐藏（进入选框）不应导致程序退出
+    app.setQuitOnLastWindowClosed(False)
+
     icon_path = os.path.join(BASE_DIR, "assets", "app.ico")
-    if os.path.exists(icon_path):
-        app.setWindowIcon(QIcon(icon_path))
+    icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+    app.setWindowIcon(icon)
     if _ocr_engine is None:
         from PySide6.QtWidgets import QMessageBox
         QMessageBox.critical(None, "TextLens", "未找到可用的 Windows OCR 引擎，请确认系统语言包包含中文/英文。")
         sys.exit(1)
+
     w = FloatWindow()
     w.show()
+
+    if QSystemTrayIcon.isSystemTrayAvailable():
+        _tray = QSystemTrayIcon(icon, app)
+        _tray.setToolTip("TextLens - 屏幕文字提取")
+        menu = QMenu()
+        _tray_menu = menu  # 保持引用，避免被 Python GC 回收
+        act_cap = menu.addAction("提取文字")
+        _act_toggle = menu.addAction("隐藏浮窗")
+        menu.addSeparator()
+        act_quit = menu.addAction("退出 TextLens")
+        act_cap.triggered.connect(w.start_capture)
+        _act_toggle.triggered.connect(lambda: _toggle_float(w))
+        act_quit.triggered.connect(QApplication.quit)
+        _tray.setContextMenu(menu)
+        _tray.activated.connect(
+            lambda reason: _toggle_float(w)
+            if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick)
+            else None
+        )
+        _tray.show()
+        notify("TextLens", "已启动，单击猫爪开始提取文字", 2500)
+    else:
+        print("[TextLens] 系统托盘不可用，未创建托盘图标")
+
     sys.exit(app.exec())
 
 
